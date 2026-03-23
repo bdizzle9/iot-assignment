@@ -10,13 +10,31 @@
 const char* apSSID     = "ESP32-Setup";
 const char* apPassword = "12345678";
 
+// LED and Sensor pins
+const int TMP36_PIN = 9;
+
+const int LED1 =10;
+const int LED2 =5;
+const int LED3 =6;
+
+
 // Web server
 WebServer webServer(80);
 
 // ---------- Simulated state ----------
-int   currentPattern = 0;                          // 0=Off 1=Blink 2=Chase 3=Pulse
-const char* patternNames[] = { "Off", "Blink", "Chase", "Pulse" };
-const int   NUM_PATTERNS   = 4;
+int   currentPattern = 0;                          // 0=Off 1=Blink 2=Chase 3=Pulse 4=Temp Sensitive
+const char* patternNames[] = { "Off", "Blink", "Chase", "Pulse", "Temp Sensitive" };
+const int   NUM_PATTERNS   = 5;
+
+// Pattern timing variables
+unsigned long patternTimer = 0;
+int blinkState = 0;
+int chaseStep = 0;
+int pulseDirection = 1;
+int pulseBrightness = 0;
+
+// Sensor data storage
+float lastTemperature = 0.0;
 
 // Forward declarations
 void hndlRoot();
@@ -29,9 +47,14 @@ void hndlSetPattern();
 void apListForm(String &f);
 String ip2str(IPAddress addr);
 String wifiStatusStr();
+void updateLEDPattern();
 
 // ================================================================
 void setup() {
+  
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
   Serial.begin(115200);
   delay(100);
   Serial.println("Starting Ex09...");
@@ -39,20 +62,27 @@ void setup() {
   randomSeed(analogRead(0));   // Seed RNG from floating pin
 
   WiFi.mode(WIFI_AP_STA);
+// In setup(), after WiFi.mode(WIFI_AP_STA):
   WiFi.softAP(apSSID, apPassword);
   Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
 
-  // Routes
-  webServer.on("/",            hndlRoot);
-  webServer.on("/wifi",        hndlWifi);
-  webServer.on("/wifichz",     hndlWifichz);
-  webServer.on("/status",      hndlStatus);
-  webServer.on("/dashboard",   hndlDashboard);
-  webServer.on("/sensordata",  hndlSensorData);   // AJAX endpoint
-  webServer.on("/setpattern",  hndlSetPattern);   // AJAX endpoint
-  webServer.onNotFound([](){
-    webServer.send(404, "text/plain", "Page not found");
-  });
+  // Scan once at boot before the web server starts
+  Serial.println("Scanning networks...");
+  WiFi.scanNetworks();  // blocking here is fine — no clients yet
+  Serial.println("Scan done.");
+
+  webServer.begin();
+    // Routes
+    webServer.on("/",            hndlRoot);
+    webServer.on("/wifi",        hndlWifi);
+    webServer.on("/wifichz",     hndlWifichz);
+    webServer.on("/status",      hndlStatus);
+    webServer.on("/dashboard",   hndlDashboard);
+    webServer.on("/sensordata",  hndlSensorData);   // AJAX endpoint
+    webServer.on("/setpattern",  hndlSetPattern);   // AJAX endpoint
+    webServer.onNotFound([](){
+      webServer.send(404, "text/plain", "Page not found");
+    });
 
   webServer.begin();
   Serial.println("HTTP server started");
@@ -60,6 +90,8 @@ void setup() {
 
 void loop() {
   webServer.handleClient();
+  updateLEDPattern();
+  delay(10);  // Small delay to prevent overwhelming the board
 }
 
 // ================================================================
@@ -222,21 +254,6 @@ void hndlDashboard() {
       <div class='value' id='temp'>--</div>
       <div class='unit'>°C</div>
     </div>
-    <div class='card'>
-      <div class='label'>Humidity</div>
-      <div class='value' id='hum'>--</div>
-      <div class='unit'>%</div>
-    </div>
-    <div class='card'>
-      <div class='label'>Light Level</div>
-      <div class='value' id='light'>--</div>
-      <div class='unit'>lux</div>
-    </div>
-    <div class='card'>
-      <div class='label'>Pressure</div>
-      <div class='value' id='pres'>--</div>
-      <div class='unit'>hPa</div>
-    </div>
   </div>
 
   <!-- LED Pattern -->
@@ -251,6 +268,7 @@ void hndlDashboard() {
       <button class='pattern-btn' onclick='setPattern(1)'>&#x1F4A1; Blink</button>
       <button class='pattern-btn' onclick='setPattern(2)'>&#x27A1;&#xFE0F; Chase</button>
       <button class='pattern-btn' onclick='setPattern(3)'>&#x1F7E3; Pulse</button>
+      <button class='pattern-btn' onclick='setPattern(4)'>&#x1F321; Temp</button>
     </div>
   </div>
 
@@ -265,10 +283,7 @@ void hndlDashboard() {
       fetch('/sensordata')
         .then(r => r.json())
         .then(d => {
-          document.getElementById('temp').textContent  = d.temperature;
-          document.getElementById('hum').textContent   = d.humidity;
-          document.getElementById('light').textContent = d.light;
-          document.getElementById('pres').textContent  = d.pressure;
+          document.getElementById('temp').textContent = d.temperature;
 
           document.getElementById('patternName').textContent = d.patternName;
 
@@ -308,20 +323,19 @@ void hndlDashboard() {
 }
 
 // ================================================================
-// AJAX endpoint – returns JSON with random sensor data
+// AJAX endpoint – returns JSON with temperature sensor data
 // ================================================================
 void hndlSensorData() {
-  // Simulated random sensor values
-  float temperature = 18.0 + (random(0, 140) / 10.0);   // 18.0 – 32.0 °C
-  float humidity    = 30.0 + (random(0, 600) / 10.0);   // 30.0 – 90.0 %
-  int   light       = random(100, 1000);                  // 100 – 999 lux
-  int   pressure    = random(990, 1030);                  // 990 – 1029 hPa
+  // TMP36 temperature sensor reading (analog value 0-4095)
+  int raw = analogRead(TMP36_PIN);
+  float voltage = raw * (3.3 / 4095.0);
+  float temperature = (voltage - 0.5) * 100.0;
+
+  // Store sensor value for pattern use
+  lastTemperature = temperature;
 
   String json = "{";
   json += "\"temperature\":"  + String(temperature, 1) + ",";
-  json += "\"humidity\":"     + String(humidity, 1)    + ",";
-  json += "\"light\":"        + String(light)          + ",";
-  json += "\"pressure\":"     + String(pressure)       + ",";
   json += "\"pattern\":"      + String(currentPattern) + ",";
   json += "\"patternName\":\"" + String(patternNames[currentPattern]) + "\"";
   json += "}";
@@ -339,6 +353,11 @@ void hndlSetPattern() {
     int id = webServer.arg("id").toInt();
     if (id >= 0 && id < NUM_PATTERNS) {
       currentPattern = id;
+      patternTimer = 0;
+      blinkState = 0;
+      chaseStep = 0;
+      pulseBrightness = 0;
+      pulseDirection = 1;
       Serial.print("Pattern changed to: ");
       Serial.println(patternNames[currentPattern]);
     }
@@ -407,10 +426,16 @@ void hndlStatus() {
 // ================================================================
 // Helpers
 // ================================================================
+
+
 void apListForm(String &f) {
-  int n = WiFi.scanNetworks();
-  if (n == 0) {
-    f = "<p>No networks found. <a href='/'>Back</a></p>";
+  int n = WiFi.scanComplete();
+  if (n <= 0) {
+    // Trigger a fresh blocking scan — only runs when user explicitly asks
+    n = WiFi.scanNetworks();
+  }
+  if (n <= 0) {
+    f = "<p>No networks found. <a href='/wifi'>Try again</a></p>";
     return;
   }
   f  = "<h2>Available Wi-Fi Networks</h2>";
@@ -422,7 +447,8 @@ void apListForm(String &f) {
   }
   f += "<br>Password: <input type='password' name='key'><br><br>";
   f += "<input type='submit' value='Connect'></form>";
-  f += "<p><a href='/'>Home</a></p>";
+  f += "<a href='/wifi'>Rescan</a> | <a href='/'>Home</a>";
+  WiFi.scanDelete();
 }
 
 String ip2str(IPAddress addr) {
@@ -438,5 +464,83 @@ String wifiStatusStr() {
     case WL_CONNECTION_LOST: return "Connection lost";
     case WL_DISCONNECTED:    return "Disconnected";
     default:                 return "Unknown";
+  }
+}
+
+// ================================================================
+// Non-blocking LED pattern update (runs in loop)
+// ================================================================
+void updateLEDPattern() {
+  unsigned long currentTime = millis();
+  unsigned long elapsed = currentTime - patternTimer;
+
+  switch (currentPattern) {
+    case 0: // Off
+      digitalWrite(LED1, LOW);
+      digitalWrite(LED2, LOW);
+      digitalWrite(LED3, LOW);
+      break;
+
+    case 1: // Blink - toggle LED1 every 200ms
+
+      if (elapsed >= 200) {
+        blinkState = 1 - blinkState;
+        digitalWrite(LED1, blinkState ? HIGH : LOW);
+        digitalWrite(LED2, blinkState ? HIGH : LOW);
+        digitalWrite(LED3, blinkState ? HIGH : LOW);
+        patternTimer = currentTime;
+      }
+      break;
+
+    case 2: // Chase - rotate through LEDs
+      if (elapsed >= 150) {
+        digitalWrite(LED1, LOW);
+        digitalWrite(LED2, LOW);
+        digitalWrite(LED3, LOW);
+        
+        int ledPin;
+        if (chaseStep == 0) ledPin = LED1;
+        else if (chaseStep == 1) ledPin = LED2;
+        else ledPin = LED3;
+        
+        digitalWrite(ledPin, HIGH);
+        chaseStep = (chaseStep + 1) % 3;
+        patternTimer = currentTime;
+      }
+      break;
+
+    case 3: // Pulse - fade in/out
+      if (elapsed >= 30) {
+        analogWrite(LED1, pulseBrightness);
+        analogWrite(LED2, pulseBrightness);
+        analogWrite(LED3, pulseBrightness);
+        
+        if (pulseDirection == 1) {
+          pulseBrightness += 5;
+          if (pulseBrightness >= 255) {
+            pulseBrightness = 255;
+            pulseDirection = -1;
+          }
+        } else {
+          pulseBrightness -= 5;
+          if (pulseBrightness <= 0) {
+            pulseBrightness = 0;
+            pulseDirection = 1;
+          }
+        }
+        patternTimer = currentTime;
+      }
+      break;
+
+    case 4: // Temp Sensitive - brightness by temperature
+      if (elapsed >= 100) {
+        float tempClamped = constrain(lastTemperature, 0.0, 50.0);
+        int brightness = map((int)(tempClamped * 10), 0, 500, 0, 255);
+        analogWrite(LED1, brightness);
+        analogWrite(LED2, brightness);
+        analogWrite(LED3, brightness);
+        patternTimer = currentTime;
+      }
+      break;
   }
 }
