@@ -256,6 +256,12 @@ void hndlDashboard() {
     </div>
   </div>
 
+  <!-- Temperature history graph -->
+  <div class='section-title'>Temperature History (Last Minute)</div>
+  <div class='card'>
+    <canvas id='tempChart' width='600' height='240'></canvas>
+  </div>
+
   <!-- LED Pattern -->
   <div class='section-title'>LED Pattern</div>
   <div class='led-box'>
@@ -284,6 +290,7 @@ void hndlDashboard() {
         .then(r => r.json())
         .then(d => {
           document.getElementById('temp').textContent = d.temperature;
+          pushTemperature(parseFloat(d.temperature));
 
           document.getElementById('patternName').textContent = d.patternName;
 
@@ -310,6 +317,75 @@ void hndlDashboard() {
     function setPattern(id) {
       fetch('/setpattern?id=' + id)
         .then(() => fetchData());   // Refresh immediately after change
+    }
+
+    // Chart state (manual drawing)
+    const tempHistory = [];
+    const maxSamples = 30; // 30 samples at 2 sec = 60 sec
+
+    const canvas = document.getElementById('tempChart');
+    const ctx = canvas.getContext('2d');
+
+    function drawGraph() {
+      const width = canvas.width;
+      const height = canvas.height;
+      const padding = 30;
+
+      // clear
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, width, height);
+
+      // axis lines
+      ctx.strokeStyle = '#586e75';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padding, padding);
+      ctx.lineTo(padding, height - padding);
+      ctx.lineTo(width - padding, height - padding);
+      ctx.stroke();
+
+      if (tempHistory.length === 0) return;
+
+      const maxTemp = Math.max(50, ...tempHistory.map(e => e));
+      const minTemp = Math.min(0, ...tempHistory.map(e => e));
+      const range = maxTemp - minTemp || 1;
+
+      // draw lines
+      ctx.strokeStyle = '#ff4136';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      tempHistory.forEach((temp, idx) => {
+        const x = padding + (idx / (maxSamples - 1 || 1)) * (width - 2 * padding);
+        const y = height - padding - ((temp - minTemp) / range) * (height - 2 * padding);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // draw points
+      ctx.fillStyle = '#ff4136';
+      tempHistory.forEach((temp, idx) => {
+        const x = padding + (idx / (maxSamples - 1 || 1)) * (width - 2 * padding);
+        const y = height - padding - ((temp - minTemp) / range) * (height - 2 * padding);
+        ctx.beginPath();
+        ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // y-axis labels
+      ctx.fillStyle = '#eee';
+      ctx.font = '12px sans-serif';
+      for (let i = 0; i <= 5; i++) {
+        const value = minTemp + (i / 5) * range;
+        const y = height - padding - (i / 5) * (height - 2 * padding);
+        ctx.fillText(value.toFixed(1) + '°C', 3, y + 4);
+      }
+    }
+
+    function pushTemperature(value) {
+      if (tempHistory.length >= maxSamples) tempHistory.shift();
+      tempHistory.push(value);
+      drawGraph();
     }
 
     fetchData();                    // Load immediately on page open
@@ -352,14 +428,45 @@ void hndlSetPattern() {
   if (webServer.hasArg("id")) {
     int id = webServer.arg("id").toInt();
     if (id >= 0 && id < NUM_PATTERNS) {
+      // Detach PWM from all LED pins to restore digital behavior (ESP32)
+      ledcDetachPin(LED1);
+      ledcDetachPin(LED2);
+      ledcDetachPin(LED3);
+
+      // Disable PWM output from Temp Sensitive mode if active
+      if (currentPattern == 4) {
+        analogWrite(LED1, 0);
+        analogWrite(LED2, 0);
+        analogWrite(LED3, 0);
+      }
+
       currentPattern = id;
-      patternTimer = 0;
+      patternTimer = millis();                 // reset timer to now
       blinkState = 0;
       chaseStep = 0;
       pulseBrightness = 0;
       pulseDirection = 1;
+
+      // force immediate baseline state for new pattern
+      digitalWrite(LED1, LOW);
+      digitalWrite(LED2, LOW);
+      digitalWrite(LED3, LOW);
+
+      if (currentPattern == 0) {
+        // keep off
+      } else if (currentPattern == 1) {
+        // start blink with off state; updateLEDPattern will flip after interval
+      } else if (currentPattern == 2) {
+        chaseStep = 0;
+      } else if (currentPattern == 3) {
+        pulseBrightness = 0;
+      }
+
       Serial.print("Pattern changed to: ");
       Serial.println(patternNames[currentPattern]);
+
+      // immediately apply the new pattern state to avoid stale behavior
+      updateLEDPattern();
     }
   }
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
