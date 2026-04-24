@@ -1,20 +1,21 @@
-// Ex09.cpp
-// COM3505 – Exercise 09
-// Exercise 09: ESP32 Wi-Fi Provisioning using AP mode
-// Added: Live dashboard with AJAX sensor readings and LED pattern controls
-
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include <ESPmDNS.h>
 
 // Access Point credentials
-const char* apSSID     = "ESP32-Setup";
+const char* apSSID     = "IOT-Project-Setup";
 const char* apPassword = "12345678";
 
-// Flask server – update this to your PC's local IP before flashing
-const char* FLASK_SERVER    = "http://192.168.1.144:5000";
+const char* FLASK_SERVER    = "http://192.168.1.64:5000";
 const unsigned long POST_INTERVAL = 2000;   // POST sensor data every 2 s
 unsigned long lastPost = 0;
+
+const unsigned long PRINT_INTERVAL = 10000; // serial join-hint every 10 s
+unsigned long lastPrint = 0;
+
+unsigned long lastFlaskError = 0;
+bool flaskReachable = false;
 
 // LED and Sensor pins
 const int TMP36_PIN = 9;
@@ -33,9 +34,9 @@ const int LED_GREEN  = LED3;
 WebServer webServer(80);
 
 // ---------- Simulated state ----------
-int   currentPattern = 0;                          // 0=Off 1=Blink 2=Chase 3=Pulse 4=Temp Sensitive
-const char* patternNames[] = { "Off", "Blink", "Chase", "Pulse", "Temp Sensitive" };
-const int   NUM_PATTERNS   = 5;
+int   currentPattern = 0;                          // 0=Off 1=Blink 2=Chase 3=Pulse 4=Temp Sensitive 5=Temp Binary
+const char* patternNames[] = { "Off", "Blink", "Chase", "Pulse", "Temp Sensitive", "Temp Binary" };
+const int   NUM_PATTERNS   = 6;
 
 // Pattern timing variables
 unsigned long patternTimer = 0;
@@ -78,6 +79,7 @@ void setup() {
 // In setup(), after WiFi.mode(WIFI_AP_STA):
   WiFi.softAP(apSSID, apPassword);
   Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
+  MDNS.begin("esp32");
 
   // Scan once at boot before the web server starts
   Serial.println("Scanning networks...");
@@ -103,9 +105,16 @@ void setup() {
 
 void loop() {
   webServer.handleClient();
-  postSensorData();       // Send temperature to Flask; apply any pattern update
+  postSensorData();
   updateLEDPattern();
-  delay(10);  // Small delay to prevent overwhelming the board
+
+  if (WiFi.status() != WL_CONNECTED && millis() - lastPrint >= PRINT_INTERVAL) {
+    lastPrint = millis();
+    Serial.printf("Join WiFi network '%s' and visit http://esp32.local (or http://%s)\n",
+                  apSSID, ip2str(WiFi.softAPIP()).c_str());
+  }
+
+  delay(10);
 }
 
 // ================================================================
@@ -142,7 +151,7 @@ void hndlRoot() {
   <p>
     <a href='/wifi'>Connect to Wi-Fi</a> |
     <a href='/status'>Status</a> |
-    <a href='http://192.168.1.144:5000'>Flask Dashboard</a>
+    <a href='http://192.168.1.64:5000'>Flask Dashboard</a>
   </p>
   <p><small>If the Flask link does not load, make sure your device is connected
   to the same Wi-Fi network as this ESP32, not the ESP32-Setup hotspot.</small></p>
@@ -153,9 +162,7 @@ void hndlRoot() {
   webServer.send(200, "text/html", html);
 }
 
-// ================================================================
 // Dashboard page – AJAX-powered live updates
-// ================================================================
 void hndlDashboard() {
   String html = R"rawhtml(
 <!DOCTYPE html>
@@ -182,7 +189,14 @@ void hndlDashboard() {
     <button class='pattern-btn' onclick='setPattern(2)'>Chase</button>
     <button class='pattern-btn' onclick='setPattern(3)'>Pulse</button>
     <button class='pattern-btn' onclick='setPattern(4)'>Temp</button>
+    <button class='pattern-btn' onclick='setPattern(5)'>Temp Binary</button>
   </div>
+
+  <p id='binary-info' style='display:none'><small>
+    <b>Temp Binary</b> shows the temperature as a 3-bit signed offset from 20&deg;C.<br>
+    LED1 = sign bit (lit = below 20&deg;C), LED2 = +2&deg;C, LED3 = +1&deg;C.<br>
+    Range: 16&deg;C (100) &rarr; 20&deg;C (000) &rarr; 23&deg;C+ (011).
+  </small></p>
 
   <p><small>Updating every 2s &mdash; last update: <span id='lastUpdate'>--</span></small></p>
 
@@ -205,6 +219,9 @@ void hndlDashboard() {
           document.querySelectorAll('.pattern-btn').forEach((btn, i) => {
             btn.classList.toggle('active', i === d.pattern);
           });
+
+          document.getElementById('binary-info').style.display =
+            d.pattern === 5 ? 'block' : 'none';
 
           // Timestamp
           const now = new Date();
@@ -301,9 +318,7 @@ void hndlDashboard() {
   webServer.send(200, "text/html", html);
 }
 
-// ================================================================
 // AJAX endpoint – returns JSON with temperature sensor data
-// ================================================================
 void hndlSensorData() {
   // TMP36 temperature sensor reading (analog value 0-4095)
   int raw = analogRead(TMP36_PIN);
@@ -324,9 +339,7 @@ void hndlSensorData() {
   webServer.send(200, "application/json", json);
 }
 
-// ================================================================
 // AJAX endpoint – change LED pattern
-// ================================================================
 void hndlSetPattern() {
   if (webServer.hasArg("id")) {
     int id = webServer.arg("id").toInt();
@@ -375,18 +388,34 @@ void hndlSetPattern() {
   webServer.send(200, "text/plain", "OK");
 }
 
-// ================================================================
 // Wi-Fi selection page
-// ================================================================
 void hndlWifi() {
+  int n = WiFi.scanComplete();
+
+  if (n == WIFI_SCAN_RUNNING) {
+    // Still sacnning — return a page that refreshes itself
+    webServer.send(200, "text/html",
+      "<html><head><meta http-equiv='refresh' content='2;url=/wifi'></head>"
+      "<body><p>Scanning for networks, please wait...</p></body></html>");
+    return;
+  }
+
+  if (n < 0) {
+    // No scan running — kick off an async scan and show waiting page
+    WiFi.scanNetworks(/*async=*/true);
+    webServer.send(200, "text/html",
+      "<html><head><meta http-equiv='refresh' content='2;url=/wifi'></head>"
+      "<body><p>Scanning for networks, please wait...</p></body></html>");
+    return;
+  }
+
+  // Scan complete — show results
   String form = "";
   apListForm(form);
   webServer.send(200, "text/html", form);
 }
 
-// ================================================================
 // Handle Wi-Fi form submission
-// ================================================================
 void hndlWifichz() {
   String ssid = webServer.arg("ssid");
   String key  = webServer.arg("key");
@@ -419,9 +448,7 @@ void hndlWifichz() {
     head + msg + "<p><a href='/status'>Status</a> | <a href='/wifi'>Try again</a></p></body></html>");
 }
 
-// ================================================================
 // Status page
-// ================================================================
 void hndlStatus() {
   String s = "<!DOCTYPE html><html><head><title>ESP32</title><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><style>body{font-family:sans-serif;max-width:500px;margin:20px auto;padding:0 12px}canvas{width:100%}button{margin:4px 2px;padding:6px 12px;cursor:pointer}button.active{font-weight:bold;text-decoration:underline}</style></head><body>";
   s += "<p><a href='/'>Home</a></p>";
@@ -435,17 +462,11 @@ void hndlStatus() {
   webServer.send(200, "text/html", s);
 }
 
-// ================================================================
 // Helpers
-// ================================================================
 
 
 void apListForm(String &f) {
   int n = WiFi.scanComplete();
-  if (n <= 0) {
-    // Trigger a fresh blocking scan — only runs when user explicitly asks
-    n = WiFi.scanNetworks();
-  }
   if (n <= 0) {
     f = "<p>No networks found. <a href='/wifi'>Try again</a></p>";
     return;
@@ -481,9 +502,7 @@ String wifiStatusStr() {
   }
 }
 
-// ================================================================
 // Flask integration – POST sensor data, receive pattern updates
-// ================================================================
 
 // Parse {"pattern": N} out of a Flask JSON response and apply it
 void applyPatternFromJson(String json) {
@@ -526,6 +545,7 @@ void postSensorData() {
   lastTemperature   = temperature;
 
   HTTPClient http;
+  http.setTimeout(1500);
   http.begin(String(FLASK_SERVER) + "/data");
   http.addHeader("Content-Type", "application/json");
 
@@ -533,16 +553,19 @@ void postSensorData() {
   int code = http.POST(body);
 
   if (code == 200) {
+    if (!flaskReachable) {
+      flaskReachable = true;
+      Serial.printf("Flask running – visit %s\n", FLASK_SERVER);
+    }
     applyPatternFromJson(http.getString());
-  } else {
+  } else if (millis() - lastFlaskError >= 20000) {
+    lastFlaskError = millis();
     Serial.printf("Flask POST failed, HTTP %d\n", code);
   }
   http.end();
 }
 
-// ================================================================
 // Non-blocking LED pattern update (runs in loop)
-// ================================================================
 void updateLEDPattern() {
   unsigned long currentTime = millis();
   unsigned long elapsed = currentTime - patternTimer;
@@ -634,5 +657,17 @@ void updateLEDPattern() {
         }
       }
       break;
+
+    case 5: { // Temp Binary – 3-bit two's complement offset from 20°C
+      // offset = temp - 20, clamped to [-4, 3] (full 3-bit two's complement range)
+      // LED1 = sign bit (MSB), LED2 = bit 1, LED3 = bit 0 (LSB)
+      int offset = (int)round(lastTemperature) - 20;
+      offset = constrain(offset, -4, 3);
+      int bits = offset & 0x07;  // mask to 3 bits (handles two's complement negative)
+      digitalWrite(LED1, (bits >> 2) & 1 ? HIGH : LOW);
+      digitalWrite(LED2, (bits >> 1) & 1 ? HIGH : LOW);
+      digitalWrite(LED3, (bits >> 0) & 1 ? HIGH : LOW);
+      break;
+    }
   }
 }

@@ -32,7 +32,7 @@ state = {
     "last_seen": None,            # ISO timestamp of last ESP32 POST
 }
 
-PATTERN_NAMES = ["Off", "Blink", "Chase", "Pulse", "Temp Sensitive"]
+PATTERN_NAMES = ["Off", "Blink", "Chase", "Pulse", "Temp Sensitive", "Temp Binary"]
 
 # Rolling 60-point history (one entry per ESP32 POST, ~2 s apart → ~2 min)
 history: deque = deque(maxlen=60)
@@ -142,7 +142,14 @@ DASHBOARD_HTML = """
     <button class='pattern-btn' onclick='setPattern(2)'>Chase</button>
     <button class='pattern-btn' onclick='setPattern(3)'>Pulse</button>
     <button class='pattern-btn' onclick='setPattern(4)'>Temp</button>
+    <button class='pattern-btn' onclick='setPattern(5)'>Temp Binary</button>
   </div>
+
+  <p id='binary-info' style='display:none'><small>
+    <b>Temp Binary</b> shows the temperature as a 3-bit signed offset from 20&deg;C.<br>
+    LED1 = sign bit (lit = below 20&deg;C), LED2 = +2&deg;C, LED3 = +1&deg;C.<br>
+    Range: 16&deg;C (100) &rarr; 20&deg;C (000) &rarr; 23&deg;C+ (011).
+  </small></p>
 
   <p><small>Updating every 2s &mdash; last poll: <span id='polltime'>--</span></small></p>
 
@@ -277,6 +284,8 @@ DASHBOARD_HTML = """
           document.querySelectorAll('.pattern-btn').forEach((btn, i) => {
             btn.classList.toggle('active', i === currentPattern);
           });
+          document.getElementById('binary-info').style.display =
+            currentPattern === 5 ? 'block' : 'none';
         }
 
         document.getElementById('polltime').textContent =
