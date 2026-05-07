@@ -146,12 +146,12 @@ DASHBOARD_HTML = """
   </div>
 
   <p id='binary-info' style='display:none'><small>
-    <b>Temp Binary</b> shows the temperature as a 3-bit signed offset from 20&deg;C.<br>
-    LED1 = sign bit (lit = below 20&deg;C), LED2 = +2&deg;C, LED3 = +1&deg;C.<br>
-    Range: 16&deg;C (100) &rarr; 20&deg;C (000) &rarr; 23&deg;C+ (011).
+    <b>Temp Binary</b> shows the temperature as a 3-bit signed offset from 25&deg;C.<br>
+    Red LED = sign bit (lit = below 25&deg;C), Green LED = +2&deg;C, Orange LED = +1&deg;C.<br>
+    Range: 22&deg;C (100) &rarr; 25&deg;C (000) &rarr; 28&deg;C+ (011).
   </small></p>
 
-  <p><small>Updating every 2s &mdash; last poll: <span id='polltime'>--</span></small></p>
+  <p><small>Updating every 2s &dash; last poll: <span id='polltime'>--</span></small></p>
 
 <script>
   // ── Chart (plain canvas, no library) ──────────────────────────────────────
@@ -323,7 +323,5 @@ if __name__ == "__main__":
     print("=" * 55)
     print("  COM3505 Flask IoT Server")
     print("  Dashboard : http://0.0.0.0:5000/")
-    print("  ESP32 POST: http://<this-ip>:5000/data")
-    print("  ESP32 GET : http://<this-ip>:5000/pattern")
     print("=" * 55)
     app.run(host="0.0.0.0", port=5000, debug=True)

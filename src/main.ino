@@ -18,9 +18,9 @@ unsigned long lastFlaskError = 0;
 bool flaskReachable = false;
 
 // LED and Sensor pins
-const int TMP36_PIN = 9;
+const int TMP36_PIN = 10;
 
-const int LED1 = 10;  // Red LED
+const int LED1 = 9;  // Red LED
 const int LED2 = 5;   // Orange LED
 const int LED3 = 6;   // Green LED
 
@@ -53,7 +53,6 @@ void hndlRoot();
 void hndlWifi();
 void hndlWifichz();
 void hndlStatus();
-void hndlDashboard();
 void hndlSensorData();
 void hndlSetPattern();
 void apListForm(String &f);
@@ -65,7 +64,6 @@ void applyPatternFromJson(String json); // parse pattern field from Flask respon
 
 // ================================================================
 void setup() {
-  
   pinMode(LED1, OUTPUT);
   pinMode(LED2, OUTPUT);
   pinMode(LED3, OUTPUT);
@@ -92,7 +90,6 @@ void setup() {
     webServer.on("/wifi",        hndlWifi);
     webServer.on("/wifichz",     hndlWifichz);
     webServer.on("/status",      hndlStatus);
-    webServer.on("/dashboard",   hndlDashboard);
     webServer.on("/sensordata",  hndlSensorData);   // AJAX endpoint
     webServer.on("/setpattern",  hndlSetPattern);   // AJAX endpoint
     webServer.onNotFound([](){
@@ -155,162 +152,6 @@ void hndlRoot() {
   </p>
   <p><small>If the Flask link does not load, make sure your device is connected
   to the same Wi-Fi network as this ESP32, not the ESP32-Setup hotspot.</small></p>
-</body>
-</html>
-)rawhtml";
-
-  webServer.send(200, "text/html", html);
-}
-
-// Dashboard page – AJAX-powered live updates
-void hndlDashboard() {
-  String html = R"rawhtml(
-<!DOCTYPE html>
-<html>
-<head>
-  <title>ESP32 Dashboard</title>
-  <meta charset='utf-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <style>body{font-family:sans-serif;max-width:500px;margin:20px auto;padding:0 12px}canvas{width:100%}button{margin:4px 2px;padding:6px 12px;cursor:pointer}button.active{font-weight:bold;text-decoration:underline}</style>
-</head>
-<body>
-  <p><a href='/'>Home</a></p>
-  <h2>Dashboard</h2>
-
-  <p>Temperature: <b id='temp'>--</b> &deg;C</p>
-
-  <p><b>Temperature History</b></p>
-  <canvas id='tempChart' height='200'></canvas>
-
-  <p><b>LED Pattern:</b> <span id='patternName'>--</span></p>
-  <div>
-    <button class='pattern-btn' onclick='setPattern(0)'>Off</button>
-    <button class='pattern-btn' onclick='setPattern(1)'>Blink</button>
-    <button class='pattern-btn' onclick='setPattern(2)'>Chase</button>
-    <button class='pattern-btn' onclick='setPattern(3)'>Pulse</button>
-    <button class='pattern-btn' onclick='setPattern(4)'>Temp</button>
-    <button class='pattern-btn' onclick='setPattern(5)'>Temp Binary</button>
-  </div>
-
-  <p id='binary-info' style='display:none'><small>
-    <b>Temp Binary</b> shows the temperature as a 3-bit signed offset from 20&deg;C.<br>
-    LED1 = sign bit (lit = below 20&deg;C), LED2 = +2&deg;C, LED3 = +1&deg;C.<br>
-    Range: 16&deg;C (100) &rarr; 20&deg;C (000) &rarr; 23&deg;C+ (011).
-  </small></p>
-
-  <p><small>Updating every 2s &mdash; last update: <span id='lastUpdate'>--</span></small></p>
-
-  <script>
-    // Fetch sensor + pattern data from /sensordata every 2 seconds
-    function fetchData() {
-      fetch('/sensordata')
-        .then(r => r.json())
-        .then(d => {
-          document.getElementById('temp').textContent = d.temperature;
-          pushTemperature(parseFloat(d.temperature));
-
-          document.getElementById('patternName').textContent = d.patternName;
-
-          // Update dot style
-          const dot = document.getElementById('ledDot');
-          dot.className = d.pattern === 0 ? 'dot off' : 'dot';
-
-          // Highlight active button
-          document.querySelectorAll('.pattern-btn').forEach((btn, i) => {
-            btn.classList.toggle('active', i === d.pattern);
-          });
-
-          document.getElementById('binary-info').style.display =
-            d.pattern === 5 ? 'block' : 'none';
-
-          // Timestamp
-          const now = new Date();
-          document.getElementById('lastUpdate').textContent =
-            now.toLocaleTimeString();
-        })
-        .catch(() => {
-          document.getElementById('lastUpdate').textContent = 'Error – retrying...';
-        });
-    }
-
-    // Send chosen pattern to /setpattern?id=N
-    function setPattern(id) {
-      fetch('/setpattern?id=' + id)
-        .then(() => fetchData());   // Refresh immediately after change
-    }
-
-    // Chart state (manual drawing)
-    const tempHistory = [];
-    const maxSamples = 30; // 30 samples at 2 sec = 60 sec
-
-    const canvas = document.getElementById('tempChart');
-    const ctx = canvas.getContext('2d');
-
-    function drawGraph() {
-      const width = canvas.width;
-      const height = canvas.height;
-      const padding = 30;
-
-      // clear
-      ctx.fillStyle = '#0d1117';
-      ctx.fillRect(0, 0, width, height);
-
-      // axis lines
-      ctx.strokeStyle = '#586e75';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(padding, padding);
-      ctx.lineTo(padding, height - padding);
-      ctx.lineTo(width - padding, height - padding);
-      ctx.stroke();
-
-      if (tempHistory.length === 0) return;
-
-      const maxTemp = Math.max(50, ...tempHistory.map(e => e));
-      const minTemp = Math.min(0, ...tempHistory.map(e => e));
-      const range = maxTemp - minTemp || 1;
-
-      // draw lines
-      ctx.strokeStyle = '#ff4136';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      tempHistory.forEach((temp, idx) => {
-        const x = padding + (idx / (maxSamples - 1 || 1)) * (width - 2 * padding);
-        const y = height - padding - ((temp - minTemp) / range) * (height - 2 * padding);
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-
-      // draw points
-      ctx.fillStyle = '#ff4136';
-      tempHistory.forEach((temp, idx) => {
-        const x = padding + (idx / (maxSamples - 1 || 1)) * (width - 2 * padding);
-        const y = height - padding - ((temp - minTemp) / range) * (height - 2 * padding);
-        ctx.beginPath();
-        ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      });
-
-      // y-axis labels
-      ctx.fillStyle = '#eee';
-      ctx.font = '12px sans-serif';
-      for (let i = 0; i <= 5; i++) {
-        const value = minTemp + (i / 5) * range;
-        const y = height - padding - (i / 5) * (height - 2 * padding);
-        ctx.fillText(value.toFixed(1) + '°C', 3, y + 4);
-      }
-    }
-
-    function pushTemperature(value) {
-      if (tempHistory.length >= maxSamples) tempHistory.shift();
-      tempHistory.push(value);
-      drawGraph();
-    }
-
-    fetchData();                    // Load immediately on page open
-    setInterval(fetchData, 2000);   // Then every 2 seconds
-  </script>
 </body>
 </html>
 )rawhtml";
@@ -560,7 +401,7 @@ void postSensorData() {
     applyPatternFromJson(http.getString());
   } else if (millis() - lastFlaskError >= 20000) {
     lastFlaskError = millis();
-    Serial.printf("Flask POST failed, HTTP %d\n", code);
+    // Serial.printf("Flask POST failed, HTTP %d\n", code);
   }
   http.end();
 }
@@ -658,15 +499,15 @@ void updateLEDPattern() {
       }
       break;
 
-    case 5: { // Temp Binary – 3-bit two's complement offset from 20°C
-      // offset = temp - 20, clamped to [-4, 3] (full 3-bit two's complement range)
+    case 5: { // Temp Binary – 3-bit two's complement offset from 25°C
+      // offset = temp - 25, clamped to [-4, 3] (full 3-bit two's complement range)
       // LED1 = sign bit (MSB), LED2 = bit 1, LED3 = bit 0 (LSB)
-      int offset = (int)round(lastTemperature) - 20;
+      int offset = (int)round(lastTemperature) - 25;
       offset = constrain(offset, -4, 3);
       int bits = offset & 0x07;  // mask to 3 bits (handles two's complement negative)
       digitalWrite(LED1, (bits >> 2) & 1 ? HIGH : LOW);
-      digitalWrite(LED2, (bits >> 1) & 1 ? HIGH : LOW);
-      digitalWrite(LED3, (bits >> 0) & 1 ? HIGH : LOW);
+      digitalWrite(LED2, (bits >> 0) & 1 ? HIGH : LOW);
+      digitalWrite(LED3, (bits >> 1) & 1 ? HIGH : LOW);
       break;
     }
   }
