@@ -22,7 +22,6 @@ import threading
 
 app = Flask(__name__)
 
-# ── Shared state (thread-safe with a lock) ──────────────────────────────────
 lock = threading.Lock()
 
 state = {
@@ -112,7 +111,6 @@ def api_set_pattern():
     return jsonify({"ok": False, "error": "Invalid pattern id"}), 400
 
 
-# ── Dashboard web page ────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
